@@ -1,98 +1,108 @@
 # Enterprise AgentOps-RL
 
-> 面向企业知识密集型任务的可信 Agent 执行、RAG 检索和强化学习优化平台。
+> **面向企业客服与工单处理的可信 Agent Harness + AgentOps 平台**：把“会回答”的大模型，变成能够检索现行知识、查询业务状态、受控执行工单、验证结果并持续改进的服务系统。
 
-**当前阶段：项目规划（尚未实现业务代码）**  
-**计划周期：2026-10-26 至 2027-01-17（12 周）**  
-**每周投入：20–30 小时（按 25 小时规划）**  
-**每月额外预算：0–100 元，优先利用已有 GPU**
+**主业务场景：模拟金融企业的客户服务与工单处理（ServiceOps）**  
+**项目性质：公开数据 + 模拟业务系统的可复现工程/算法作品，不宣称真实企业投产**  
+**计划：2026-10-26 — 2027-01-17（12 周；前 7 天冲刺 L1/L2 核心原型）**  
+**资源：本地 WSL2 / PostgreSQL + pgvector，已有算力优先；额外预算约 ¥0–100/月**
 
-## 项目目标
+## 先解决什么业务问题？
 
-实现一个可本地部署、可复现、可用于求职演示的企业级 AI 系统：用户输入需要查询制度与执行工具的复杂业务任务；Agent 完成检索、规划、调用业务工具、校验业务状态、必要时请求人工审批，系统保留轨迹和评价指标。可选地用 SFT/GRPO 改进工具使用策略。
+传统客服/运营人员往往需要先查政策，再进入业务系统核实客户状态，最后开单或转人工。普通 RAG 只能回答问题；普通 Agent Demo 可能未经核验就调用写工具。我们实现一条**可控制、可恢复、可验收的业务闭环**：
 
-项目面向 **AI 应用开发 / RAG / Agent 算法 / LLM 后训练** 两类实习岗位，重点展示可解释的工程取舍、失败处理、自动化测试与对照实验。
+1. 接收客户咨询，确定业务类型及已知信息。
+2. 按身份、租户、有效期检索政策，输出可追溯引用。
+3. 通过授权的 MCP/Connector 查询模拟客户、申请与工单状态。
+4. 信息不足时追问；不可确认时拒答/转人工；敏感写操作需授权审批。
+5. 对可执行任务创建/更新工单，使用幂等键防止重复副作用。
+6. 用**独立于 Agent 的数据库终态 Verifier**校验结果，保存 Trace、失败原因和成本。
+7. 将坏案例回流为固定回归测试，之后再进行系统消融或模型训练。
 
-## 业务场景与范围
+具体角色、状态、接口、验收和非目标见 [业务需求与验收（PRD）](docs/PRODUCT_SCOPE.md)。
 
-- **主场景：模拟金融企业的政策检索与业务工单执行**，利用 [`τ-bench / τ-Knowledge`](https://github.com/sierra-research/tau2-bench) 中的公开业务规则、模拟环境和可验证任务。
-- 首版限定 **一个业务领域、一个主 Agent、一个 MCP Server、5–8 个业务工具、两个模拟租户、四个 Web 页面**。
-- 主线涵盖 RAG、Agent/MCP、FastAPI、PostgreSQL/pgvector、执行可靠性、权限、评测和部署。
-- **SFT 必须在可用数据和环境验证器建立后开展；GRPO 属于有资源与时间门槛的扩展目标**，不可影响前 10 周的可演示系统。
-- 不在第一版建设 Kubernetes 集群、复杂微服务或无必要的多 Agent 系统。
+## 设计原则
 
-## 架构总览
+- **业务驱动而不是框架驱动**：首版只做金融客服与工单，不做通用“万能 Agent”。
+- **Harness 优先，LangGraph 可选**：Agent Loop、上下文管理、Tool Calling 和验证逻辑使用可替换接口；LangGraph 仅用于需要状态图、审批中断和持久化恢复的流程。
+- **模型负责非确定性决策，后端负责权威规则**：权限、事务、租户隔离、审批、幂等、终态判定不得由 Prompt 保证。
+- **真实集成证明**：先用独立的模拟 CRM/工单 API 验收，再争取对接 [Zammad](https://zammad.org/) 等开源工单系统；适配器可替换。
+- **可证伪的指标**：不把对话结束视为任务成功，不把“回答准确率”代替真实业务状态，不预先宣称效果提升。
+- **实习作品的完成标准是 L3**：L1/L2 构建原型与可靠性，L3 有固定基线、实验、Bad Case 与交付证据；L4 SFT/GRPO 是可选算法扩展。
+
+## 总体架构
 
 ```mermaid
 flowchart TD
-    U[用户 / Web 前端] --> API[FastAPI API 网关]
-    API --> AUTH[身份认证 / 租户与权限校验]
-    AUTH --> AGENT[LangGraph Agent / 状态与检查点]
-    AGENT --> RAG[RAG: 全文 + pgvector + RRF + Rerank]
-    RAG --> KNOW[企业知识库 / 文档版本]
-    AGENT --> MCP[MCP 工具服务 / 参数校验]
-    MCP --> BIZ[模拟业务数据库 / 审批 / 幂等写入]
-    AGENT --> OBS[任务轨迹 / 审计 / 指标]
-    OBS --> EVAL[任务评测 / 独立状态校验器]
-    EVAL -. 可选训练轨迹 .-> TRAIN[SFT / GRPO 实验]
+    U["客服 / 运营 / 管理员"] --> API["FastAPI: API / SSE / Auth"]
+    API --> G["租户 / RBAC / 业务策略"]
+    G --> H["Agent Harness: Loop / Context / Tool Routing"]
+    H --> R["Knowledge Service: Hybrid RAG / 版本 / 引用"]
+    H --> T["MCP Client / Tool Adapter"]
+    R --> DB["PostgreSQL / pgvector"]
+    T --> CRM["独立模拟 CRM / 业务数据"]
+    T --> CASE["MockTicketAdapter / ZammadAdapter"]
+    T --> A{"敏感写操作?"}
+    A -->|是| APPROVE["服务端审批 + 幂等"]
+    A -->|否| EXEC["执行"]
+    APPROVE --> EXEC
+    EXEC --> VERIFY["业务终态 Verifier"]
+    H --> TRACE["Task Trace / Bad Case"]
+    VERIFY --> TRACE
+    TRACE --> EVAL["离线回归 / 安全测试 / 成本指标"]
+    EVAL -.-> TRAIN["可选 SFT / GRPO（隔离环境）"]
 ```
 
-**关键原则：** 工具执行的鉴权和写入保护在后端执行，不依赖模型遵守 Prompt；生产数据和训练数据隔离；评测器不依赖模型自评。
+**重要边界：** MCP 工具只有明确的受控能力；外部检索文档属于不可信输入。用户授权和敏感写入的决定由确定性后端作出。独立 Verifier 不应读取 Agent 生成的“自我评分”作为成功依据。
 
-## 12 周路线（先工程，后算法）
+## L1–L4 里程碑
 
-| 周 | 日期 | 学习与开发重点 | 必须交付 |
-|---|---|---|---|
-| W1 | 10/26–11/01 | FastAPI、Pydantic、pytest、Docker | 健康检查、基础 API、测试与本地环境 |
-| W2 | 11/02–11/08 | PostgreSQL、SQLAlchemy、Alembic、数据导入 | 核心业务表、迁移与可重复导入 |
-| W3 | 11/09–11/15 | Chunk、Embedding、pgvector、全文检索 | 支持来源追踪的 RAG 检索 API |
-| W4 | 11/16–11/22 | Hybrid、RRF、Reranker、IR 评测 | 四组检索基线及复现报告 |
-| W5 | 11/23–11/29 | LangGraph、状态、记忆、Checkpoint | 多步任务 Agent 与恢复测试 |
-| W6 | 11/30–12/06 | MCP、业务工具、Schema、人工审批 | MCP 工具服务、读写路径和调用记录 |
-| W7 | 12/07–12/13 | 多租户、RBAC、幂等、失败恢复 | 权限与可靠性测试 |
-| W8 | 12/14–12/20 | 任务 Verifier、Trace、Bad Case | Agent Benchmark 与评测报告 |
-| W9 | 12/21–12/27 | React、TypeScript、SSE、前后端集成 | 四个 Web 页面与业务演示 |
-| W10 | 12/28–01/03 | 负载测试、CI、Compose、文档 | **可演示 V1.0** |
-| W11 | 01/04–01/10 | 轨迹数据构造、LoRA、SFT | SFT 基线与隔离测试 |
-| W12 | 01/11–01/17 | GRPO（视资源）、消融、简历 | 可复现的模型比较及项目材料 |
+| 层级 | 目标 | 完成标准 |
+|---|---|---|
+| **L1：端到端业务 MVP** | FastAPI + PostgreSQL + 带证据的 RAG + 单 Agent + 工单 Mock | 真实模型执行至少一条咨询→查政策→查状态→受控工单流程；任务结果可在数据库查验 |
+| **L2：可靠的企业 Harness** | 2 租户、JWT/RBAC、审批、幂等、失败恢复、Trace | 预先定义的越权/重复提交/工具故障/中断测试通过；不能将一周原型称作生产级 |
+| **L3：可交付、可评测** | 检索和 Agent 基线、独立终态校验、Bad Case、外部系统适配、部署与性能 | 固定任务集和多组可复现对照实验；可展示运营台、失败分析与成本；**求职项目的主要完成标准** |
+| **L4：Agentic RL（可选）** | 隔离轨迹、SFT/LoRA、小规模 GRPO | 对 Base/SFT/RL 做真实测试和安全负例比较；无资源或无增益也如实报告 |
 
-完整的知识点、每日任务、交付文件与验收标准：[12 周详细计划](docs/ROADMAP.md)。
+**前 7 天（10/26–11/01）** 冲刺 L1 与 L2 **核心原型**，不是交付成熟的多租户 SaaS。后 9 周重点是质量、业务集成和证据。见 [完整 12 周计划](docs/ROADMAP.md)。
 
-## 技术栈
+## 首版范围
 
-- **API**：Python 3.12、FastAPI、Pydantic、SQLAlchemy、Alembic
-- **数据与检索**：PostgreSQL、pgvector、全文检索、RRF、Reranker
-- **Agent**：LangGraph、MCP Python SDK、带状态的工具执行
-- **业务能力**：RBAC、租户过滤、审批、审计、幂等、恢复
-- **Web**：React、Vite、TypeScript、SSE
-- **验证**：pytest、Benchmark、Trace、Recall@K、MRR、nDCG、成功率、P95 延迟
-- **训练（W11–W12）**：PyTorch、Transformers、PEFT、TRL；环境与 GPU 允许时测试 GRPO
-- **部署**：Docker Compose、GitHub Actions
+- **一个业务领域、一个主 Agent、一个 MCP Server、5–8 个受控工具、两个模拟租户、四个运营页面**。
+- **公开数据**：[Sierra τ-bench / τ-Knowledge banking_knowledge](https://github.com/sierra-research/tau2-bench) 的模拟业务数据库与知识文档；原数据与新增模拟工单表明确隔离，不虚构为真实银行数据库。
+- **关键能力**：文件/版本治理、Hybrid RAG + 可追溯引用、Agent Loop、工具适配器、权限/审批/幂等、任务持久化、独立 Verifier、Bad Case 回归和测试。
+- **非目标**：真实金融交易、商业客户数据、私自执行转账/支付、无边界自由 SQL、复杂多 Agent、大规模 K8s 集群以及首周完成后训练。
 
-## 项目文档
+## 技术选型
 
-| 文档 | 内容 |
+| 模块 | 当前选择 | 取舍理由 |
+|---|---|---|
+| HTTP | Python 3.12、FastAPI、Pydantic、SSE | Python AI 生态、类型校验与前端状态更新 |
+| 持久化 | PostgreSQL、SQLAlchemy 2、Alembic、Redis（按需） | 事务、业务状态与查询 |
+| 知识 | pgvector、PostgreSQL 全文检索、RRF、可选 Rerank | 低成本可复现、多路线检索消融 |
+| Agent | 独立 Harness 接口 + MCP；按需 LangGraph | 避免核心业务依赖单一框架 |
+| 集成 | MockCRM / MockTicket，后续 Zammad 适配器 | 验证实际 HTTP API 集成，而非只在同进程插数据库 |
+| 测试与部署 | pytest、固定 Benchmark、Trace、Docker Compose/原生 PostgreSQL、CI | 失败可复现，便于演示 |
+| 算法扩展 | PEFT / TRL / SFT，条件允许时 GRPO | 在可靠评测环境构建完成后再训练 |
+
+## 文档导航
+
+| 文件 | 内容 |
 |---|---|
-| [docs/ROADMAP.md](docs/ROADMAP.md) | W1–W12 学习目标、任务与验收 |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统边界、数据模型、MCP 工具、安全与可靠性 |
-| [docs/DATA_AND_EVALUATION.md](docs/DATA_AND_EVALUATION.md) | 公共数据接入、数据泄漏隔离、基线和评测协议 |
-| [docs/CAREER_ALIGNMENT.md](docs/CAREER_ALIGNMENT.md) | 算法与应用岗位的面试能力映射和求职交付 |
-| [docs/WORKFLOW.md](docs/WORKFLOW.md) | 每周时间安排、开发原则、里程碑及质量门槛 |
-| [docs/RESOURCES.md](docs/RESOURCES.md) | 官方学习资料与数据来源 |
+| [docs/PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md) | **先读**：业务用户、工单闭环、状态机、API 与验收标准 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 7 天冲刺 + W2–W12 里程碑与交付 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Harness 边界、系统集成、数据库、安全和恢复 |
+| [docs/DATA_AND_EVALUATION.md](docs/DATA_AND_EVALUATION.md) | τ-bench 数据使用、Verifier、指标、基线、训练隔离 |
+| [docs/CAREER_ALIGNMENT.md](docs/CAREER_ALIGNMENT.md) | 2026 年岗位/面经映射、答辩证据、简历材料 |
+| [docs/WORKFLOW.md](docs/WORKFLOW.md) | 工作节奏、PR/测试/验收/成本纪律 |
+| [docs/RESOURCES.md](docs/RESOURCES.md) | 官方资料、真实企业案例和调研线索 |
 
-## 里程碑
+## 当前实现状态（不要误读）
 
-- [ ] **M1 / W2**：数据库与 API 通过自动化测试
-- [ ] **M2 / W4**：检索基线和实验数据可复现
-- [ ] **M3 / W6**：多步骤 Agent + MCP 工具可执行任务
-- [ ] **M4 / W8**：权限、故障恢复和可验证评测通过
-- [ ] **M5 / W10**：Web、部署、CI 和演示完成
-- [ ] **M6 / W12**：SFT/（条件允许的）GRPO 实验及简历材料完成
+- `main` 分支目前主要为**设计与规划**，不是已上线的完整平台。
+- [Week 1 起步 PR #1](https://github.com/Whitelotusking/enterprise-agentops-rl/pull/1) 包含基础 FastAPI 健康接口、测试、数据库 Compose 和数据预检脚本，尚待合并；**不代表 RAG、工单或 Harness 已完成**。
+- 本地 WSL 环境与仓库状态是不同概念；开发时分别运行测试、记录日志，不把计划结果写成已实现结果。
 
-## 当前项目状态
+## 数据与安全
 
-仓库当前仅包含**规划文档和预留目录**；尚未声称 API、RAG、Agent、训练或部署可运行。开始 W1 后按周提交可运行代码和测试结果。任何成功率、性能提升或模型实验结果必须通过实际执行得到，不允许把目标值写成已实现结果。
-
-## 数据和安全说明
-
-所有企业账户、工单、审批和租户均使用公开**模拟数据**。不会上传真实客户信息、API 密钥、个人隐私或未获授权的企业资料。公共基准的训练/验证/测试划分、数据版本及许可应单独记录；不能将基准标准答案或评测状态混入训练样本。
+所有客户、账户、工单、审批与租户均是**模拟数据**；不提交真实客户信息、密钥、模型权重、公开 Benchmark 的测试答案或隐私数据。数据源、许可证、固定版本、实验配置和实际测试结果应有可验证记录。
