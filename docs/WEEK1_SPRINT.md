@@ -1,103 +1,53 @@
-# 一周冲刺：L1 + L2 核心能力（2026-10-24 至 2026-10-31）
+# Week 1 开发分支记录｜2026-10-26 至 11-01
 
-> 目标是 L1 可演示系统与 L2 安全/恢复原型。并非一周内达到生产级 L2，GRPO 不在本周范围。
+> 本文只解释 PR #1 的起步代码及首周执行细节。**最新版业务需求与整体路线图以 main 分支的 [PRODUCT_SCOPE.md](https://github.com/Whitelotusking/enterprise-agentops-rl/blob/main/docs/PRODUCT_SCOPE.md) 和 [ROADMAP.md](https://github.com/Whitelotusking/enterprise-agentops-rl/blob/main/docs/ROADMAP.md) 为准。**
+>
+> 注意：L1 是端到端业务 MVP，L2 首周只是核心安全/恢复原型；L3 可重复实验和真实系统集成才是主要求职交付标准，L4 训练可选。
 
-## 环境预检（仅代表已连接 PC2）
+## 当前 PR #1 包含什么
 
-| 项目 | 检查结果 |
-|---|---|
-| 主机 | USER-20250627GR / Windows 10 |
-| Python | 3.10.4（需单独安装 Python 3.12） |
-| uv | 0.9.10（可直接使用） |
-| Node.js | 24.11.1（前端可用） |
-| GPU | RTX 3060 Laptop 6GB（只用于轻量推理） |
-| Git / Docker | PATH 中未找到 |
-| WSL | 查询未成功，不能视作可用 |
+- FastAPI 最小应用与 `GET /health`。
+- 后端依赖配置和最小 pytest 测试。
+- PostgreSQL/pgvector Compose 文件和初始 SQL 脚本。
+- τ-bench `banking_knowledge` 数据文件清单与预检脚本。
+- 本文的首周冲刺记录。
 
-未在 PC2 安装软件，也未下载完整模型或数据集；如果换开发主机，必须重新检查。
+**尚未由本 PR 完成**：实际客户/工单模型、RAG 索引、真实模型 Agent Loop、MCP Server、JWT、租户授权、审批、幂等、业务终态 Verifier 和完整前端。不要把“环境可运行”写成“业务实现完成”。
 
-## 主数据与隔离
+## 当前开发机环境（2026-10-25）
 
-主数据为 Sierra 的 [τ-bench/τ³-bench](https://github.com/sierra-research/tau2-bench) 仓库中的 `data/tau2/domains/banking_knowledge/`：
+开发机 PC2 的新独立 WSL2 发行版 `enterprise-ubuntu` 已安装于 `J:\enterprise\wsl`，Linux 项目目录为 `/home/enterprise/projects/enterprise-agentops-rl`。
 
-- `documents/`：知识检索数据，需要切分、索引、引用溯源。
-- `db.json`：模拟业务初始状态，需要适配业务工具访问接口。
-- `tasks.json`：任务与测试相关资料；**不得将官方期望答案直接作为 Agent 的上下文或训练输入**。
-- `tasks_voice.json`：本周不使用。
+上一版此文写到“WSL 无法运行”是过时的系统服务身份检测结果：用登录用户进入 WSL 已验证可运行。PC2 的 Ubuntu 包含 Python 3.12、Node 22、Docker/Compose 以及 PostgreSQL 16/Redis 原生服务；pgvector 原生扩展已启用。因 Docker Hub 无法拉取数据库镜像，目前**不应把 Compose 可用误写成数据库容器已运行**。
 
-注意：这些是 JSON/文档，不是可以直接连接的 PostgreSQL；先做独立导入层，再逐步迁移结构。原始基准另行克隆，勿直接复制到主项目或提交包含答案的生成物。
+本地 GitHub 仓库可能是 ZIP 快照导入，缺少 `.git`；**GitHub 上的文档和本地目录不会自动同步**。在本机修改代码之前检查远程分支、Git 同步状态和本地文件。原始 τ-bench 数据应保持只读，切勿提交标准答案。
 
-## 获取公开数据并预检
+## 7 天冲刺
 
-在装有 Git 的开发机上运行：
-
-```bash
-git clone https://github.com/Whitelotusking/enterprise-agentops-rl.git
-git clone https://github.com/sierra-research/tau2-bench.git
-cd tau2-bench
-uv sync --extra knowledge --extra dev
-uv run tau2 check-data
-cd ../enterprise-agentops-rl
-python scripts/inspect_tau_data.py --repo ../tau2-bench
-```
-
-官方 Python 要求 >=3.12、<3.14；`uv sync` 使用仓库的版本约束，不需要事先覆盖系统 Python。上面的检查脚本只列出文件大小、SHA256 和文档个数，不导出答案。
-
-## 启动最小 FastAPI（目前仅健康检查）
-
-```bash
-cd backend
-uv sync --dev
-uv run pytest -q
-uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-浏览器验证 `http://127.0.0.1:8000/health` 和 `http://127.0.0.1:8000/docs`。当前 `/health` 只检查进程存活，不代表数据库、RAG 或 Agent 已实现。基础健康检查测试已在隔离验证环境通过（2/2）；PC2 尚未实际运行。
-
-## PostgreSQL + pgvector
-
-在**支持 Docker Compose 的机器上**运行。在主仓库根目录复制 `.env.example` 为 `.env`，并修改 `POSTGRES_PASSWORD` 为仅用于本地开发的强密码。
-
-```bash
-docker compose --env-file .env -f infra/compose.dev.yml up -d
-docker compose --env-file .env -f infra/compose.dev.yml exec postgres \
-  psql -U agentops -d agentops -c "SELECT extversion FROM pg_extension WHERE extname='vector';"
-```
-
-如果更改了用户名或数据库名，也相应修改检查命令。端口仅绑定 `127.0.0.1`；不直接向公网开放 5432。SQL 初始化脚本只在空数据卷第一次启动时执行。
-
-若 PC2 无法使用 Docker，不要在 Windows 上强行安装不兼容的 WSL：可在已有 Linux 机器部署数据库，使用 SSH 隧道连接。
-
-## 7 天具体安排
-
-| 日期 | 任务 | 验收 |
+| 日期 | 本周实际要做的工作 | 验收 |
 |---|---|---|
-| 10/24（D0） | 识别开发主机/环境/数据位置；准备预备代码 | 能描述本机、数据库和模型分别运行在哪里 |
-| 10/25（D1） | Git + Python 3.12 + `uv`，克隆两仓库 | `pytest`、`tau2 check-data` 成功 |
-| 10/26（D2） | Postgres/pgvector、用户/租户/文档/任务表 | 迁移成功、数据重启持久化 |
-| 10/27（D3） | 数据导入、切分、Embedding、Sparse/Dense RAG | 检索返回真实文档 ID 与来源 |
-| 10/28（D4） | 最小 LangGraph 状态机与 3–5 个工具 | 多步骤模拟任务能真实完成 |
-| 10/29（D5） | MCP Server、后端权限、审批、幂等 | 两租户越权拒绝、重复写仅一次 |
-| 10/30（D6） | 状态恢复 + 简单 Web Demo | 浏览器端可查看任务与执行记录 |
-| 10/31（D7） | 自动测试、演示录屏、README | 可复现地启动，真实报告通过/失败项 |
+| 10/26 | FastAPI 一天集中学习；业务 PRD、任务路由与 Pydantic | API 模型/pytest 通过 |
+| 10/27 | SQLAlchemy/Alembic、租户/用户/工单表、独立模拟业务 API | 工单真正写入数据库，重启可查询 |
+| 10/28 | τ-bench 文档导入、Embedding、Sparse/Dense RAG、版本/权限过滤 | 返回真实 doc ID、版本和引用 |
+| 10/29 | 单 Agent Harness、Tool-Calling Loop、查询业务状态 | 真实模型完成只读多步任务 |
+| 10/30 | MCP Server、敏感工单写入、人工审批、幂等键 | 不经授权无法写入，重复提交不会双重建单 |
+| 10/31 | 基础 JWT/RBAC、2 租户、任务状态/恢复、简单页面/SSE | 跨租户拒绝，恢复状态可追踪 |
+| 11/01 | 端到端测试与录屏、失败归因和验收记录 | 明确记录通过项/未完成项，不夸大产出 |
 
-建议每天 3–5 小时，遇到平台部署障碍时先完成 API/数据代码并用测试数据库验证，不要因为容器卡住而停止全部开发。
+后续 W2–W10 继续补齐外部系统适配（例如 Zammad）、知识治理、完整状态恢复、四组 RAG 消融、40+40 任务评测和运营台。
 
-## L1 / L2 验收门槛
+## 启动与验证（Linux）
 
-**L1**：至少一个真实模型/推理端、真实文档检索、可观察的多步工具调用和简单 Web 页面。纯规则/mock 模型只算开发测试，不能宣传 L1 已完成。
+```bash
+cd ~/projects/enterprise-agentops-rl
+source .venv/bin/activate
+cd backend
+../.venv/bin/python -m pytest -q tests
+../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
 
-**L2 核心**：两模拟租户、后端实施身份/数据权限检查、敏感操作显式审批、数据库幂等、状态持久化、结构化错误和自动化测试。不是生产级安全或大规模部署。
+从浏览器访问 `http://localhost:8000/docs`。现有 `/health` 测试只验证接口存活，不等于业务系统完成。原生数据库可用 `pg_isready`、`redis-cli ping` 检查。禁止同时启动监听相同端口的原生数据库和 Compose 数据库容器。
 
-**必需的负向测试**：跨租户非法读写、无权限敏感写入、同一幂等键重复提交、工具参数类型错误、服务重启后重复动作。
+## 本周明确不做
 
-## 本周不做
-
-SFT、GRPO、复杂多 Agent、Kubernetes、生产级 SSO、压力规模夸大和无法证明的“企业真实上线”。保持每月额外支出在 0–100 元以内，优先使用已有机器和免费开源数据。
-
-## 官方资料
-
-- [τ-bench Getting Started](https://github.com/sierra-research/tau2-bench/blob/main/docs/getting-started.md)
-- [FastAPI](https://fastapi.tiangolo.com/tutorial/)
-- [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/)
-- [pgvector](https://github.com/pgvector/pgvector)
+真实客户/交易接入、未经审批的敏感写操作、生产级多租户 SaaS、独立的复杂微服务或 Kubernetes、完整 Zammad 上线、SFT/GRPO 训练、伪造压测/准确率/商业 ROI。
